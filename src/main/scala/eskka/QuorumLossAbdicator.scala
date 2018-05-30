@@ -21,7 +21,7 @@ object QuorumLossAbdicator {
             votingMembers: VotingMembers,
             discoverySettings: DiscoverySettings,
             clusterService: ClusterService,
-            killSeq: Seq[ActorRef],
+            killSeq: List[ActorRef],
             restartHook: () => Unit) =
     Props(classOf[QuorumLossAbdicator], localNode, votingMembers, discoverySettings, clusterService, killSeq, restartHook)
 
@@ -35,7 +35,7 @@ class QuorumLossAbdicator(localNode: DiscoveryNode,
                           votingMembers: VotingMembers,
                           discoverySettings: DiscoverySettings,
                           clusterService: ClusterService,
-                          killSeq: Seq[ActorRef],
+                          killSeq: List[ActorRef],
                           restartHook: () => Unit)
   extends Actor with ActorLogging {
 
@@ -44,7 +44,9 @@ class QuorumLossAbdicator(localNode: DiscoveryNode,
 
   val cluster = Cluster(context.system)
 
-  val abdicationCheck = context.system.scheduler.schedule(CheckInterval, CheckInterval, self, Check)
+  val scheduler = context.system.scheduler
+
+  val abdicationCheck = scheduler.schedule(CheckInterval, CheckInterval, self, Check)
 
   override def postStop() {
     abdicationCheck.cancel()
@@ -52,9 +54,9 @@ class QuorumLossAbdicator(localNode: DiscoveryNode,
 
   override def receive: Actor.Receive = {
     case Check =>
-      val state = cluster.state
-      val upVoters = state.members.filter(m => m.status == MemberStatus.up && votingMembers.addresses(m.address))
-      val availableVoters = upVoters.filterNot(state.unreachable)
+      val akkaClusterState = cluster.state
+      val upVoters = akkaClusterState.members.filter(m => m.status == MemberStatus.up && votingMembers.addresses(m.address))
+      val availableVoters = upVoters.filterNot(akkaClusterState.unreachable)
       if (availableVoters.size < votingMembers.quorumSize) {
         log.warning("abdicating -- quorum unavailable {}", (votingMembers.addresses -- availableVoters.map(_.address)).mkString("[", ",", "]"))
         abdicationCheck.cancel()
@@ -66,13 +68,14 @@ class QuorumLossAbdicator(localNode: DiscoveryNode,
   def abdicate: Actor.Receive = {
     case Abdicate =>
       killSeq.foreach(context.stop)
+
       SubmitClusterStateUpdate(clusterService, "eskka-quorum-loss-abdicator", Priority.URGENT, runOnlyOnMaster = false, abdicationClusterState) onComplete {
         case Success(_) =>
           log.debug("cleared cluster state, now invoking restart hook")
           restartHook()
         case Failure(e) =>
           log.error(e, "failed to clear cluster state, will retry in {}", CheckInterval)
-          context.system.scheduler.scheduleOnce(CheckInterval, self, Abdicate)
+          scheduler.scheduleOnce(CheckInterval, self, Abdicate)
       }
   }
 
